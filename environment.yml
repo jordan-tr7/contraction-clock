@@ -1,0 +1,7 @@
+name: contraction-clock
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - nodejs
+  - make
