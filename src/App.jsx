@@ -1,17 +1,19 @@
 import { useState, useEffect, useRef } from "react";
 
-// ── Constants ──────────────────────────────────────────────────────────────
+
+// ---------------------------- CONSTANT VALUES ---------------------------- //
+
 const STORAGE_KEY = "contraction-clock-session";
 const TICK_MS = 100;
-
 const Y_AXIS_W = 44;
 const X_LABEL_H = 22;
 const CHART_H = 220;
 const PLOT_H = CHART_H - X_LABEL_H;
 const PEAK_PAD = 16;
-
 const PX_PER_SEC = 4;
 const MIN_REST_PX = 32;
+
+// --------------------------- HELPER FUNCTIONS ---------------------------- //
 
 function gauss(x) {
   const sigma = 0.15;
@@ -38,18 +40,21 @@ function buildBellPath(x0, widthPx, intensity, progress = 1) {
   return { stroke, fill };
 }
 
+function secPx(ms) {
+  return (ms / 1000) * PX_PER_SEC;
+}
+
 function formatDuration(ms) {
-  const s = Math.floor(ms / 1000);
+  const s = Math.round(ms / 1000);
   const m = Math.floor(s / 60);
   return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
 }
 function formatTime(ts) {
   return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
-function secPx(ms) {
-  return (ms / 1000) * PX_PER_SEC;
-}
 
+
+// function for window resizing to help with mobile layout
 function useWindowWidth() {
   const [width, setWidth] = useState(window.innerWidth);
   useEffect(() => {
@@ -60,8 +65,11 @@ function useWindowWidth() {
   return width;
 }
 
-// ── Main Component ─────────────────────────────────────────────────────────
+
+// ------------------------- STATE SETUP FOR APP --------------------------- //
+
 export default function ContractionClock() {
+
   const [contractions, setContractions] = useState(() => {
     try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
     catch { return []; }
@@ -71,7 +79,7 @@ export default function ContractionClock() {
   const [intensity, setIntensity] = useState(5);
   const [now, setNow] = useState(Date.now());
   const scrollRef = useRef(null);
-  const [containerWidth, setContainerWidth] = useState(() => window.innerWidth);
+  const [containerWidth, setContainerWidth] = useState(0);
   const windowWidth = useWindowWidth();
   const isMobile = windowWidth < 640;
 
@@ -98,9 +106,17 @@ export default function ContractionClock() {
       setContainerWidth(entry.contentRect.width);
     });
     ro.observe(el);
-    setContainerWidth(el.clientWidth);
+    // Measure immediately after mount
+    setContainerWidth(el.getBoundingClientRect().width);
     return () => ro.disconnect();
   }, []);
+
+  // Re-measure whenever the window resizes (catches orientation changes on mobile)
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    setContainerWidth(el.getBoundingClientRect().width);
+  }, [windowWidth]);
 
   const toggleContraction = () => {
     if (!activeStart) {
@@ -121,7 +137,8 @@ export default function ContractionClock() {
     localStorage.removeItem(STORAGE_KEY);
   };
 
-  // ── Build chart segments ───────────────────────────────────────────────
+
+  // ------------------------ build chart segments  ------------------------ //
   const segments = [];
   const LEAD_PX = 24;
   let cursor = Y_AXIS_W + 8;
@@ -168,10 +185,66 @@ export default function ContractionClock() {
 
   const yTicks = [0, 2, 4, 6, 8, 10];
 
+  // ------------------------------ 511 RULE ------------------------------- //
+
+  // Contractions <= 5 min apart (start-to-start), lasting >= 1 min each, for >= 1 hour
+  const FIVE_MIN_MS = 5 * 60 * 1000;
+  const ONE_MIN_MS  = 60 * 1000;
+  const ONE_HOUR_MS = 60 * 60 * 1000;
+
+  // Walk backwards from the most recent contraction to find the current qualifying streak:
+  // the longest tail of contractions where EVERY contraction lasts >= 1 min AND every
+  // consecutive interval is <= 5 min. The streak start time is the start of the earliest
+  // qualifying contraction in that unbroken run.
+  let qualifyingStreakStart = null; // start time of the earliest contraction in the current streak
+
+  if (contractions.length >= 1) {
+    // Start from the last contraction and walk backwards as long as criteria hold
+    let streakBegin = contractions.length - 1; // index of earliest contraction still in streak
+
+    // The last contraction must itself last >= 1 min to be in the streak
+    if (contractions[streakBegin].duration >= ONE_MIN_MS) {
+      // Walk backwards: each prior contraction must also last >= 1 min
+      // and the interval to the next must be <= 5 min
+      for (let i = contractions.length - 2; i >= 0; i--) {
+        const interval = contractions[i + 1].start - contractions[i].start;
+        const dur = contractions[i].duration;
+        if (dur >= ONE_MIN_MS && interval <= FIVE_MIN_MS) {
+          streakBegin = i;
+        } else {
+          break; // streak broken
+        }
+      }
+      qualifyingStreakStart = contractions[streakBegin].start;
+    }
+  }
+
+  // How long has the current qualifying streak been running?
+  // Use `now` so the timer ticks live while a contraction is active.
+  const streakDuration = qualifyingStreakStart !== null ? now - qualifyingStreakStart : 0;
+  const rule511Met = streakDuration >= ONE_HOUR_MS;
+
+  // Frequency and Duration tiles use ALL session contractions
+  const allIntervals = contractions.length >= 2
+    ? contractions.slice(1).map((c, i) => c.start - contractions[i].start)
+    : [];
+  const avgRecentInterval = allIntervals.length
+    ? allIntervals.reduce((a, b) => a + b, 0) / allIntervals.length : null;
+
+  const avgRecentDuration = contractions.length
+    ? contractions.reduce((a, b) => a + b.duration, 0) / contractions.length : null;
+
+  // Ongoing tile still uses the strict qualifying streak
+  const streakContractions = qualifyingStreakStart !== null
+    ? contractions.filter(c => c.start >= qualifyingStreakStart)
+    : [];
+
   // In live mode, pan data left so the rightmost content aligns to the container's right edge.
-  // Clamp between 0 (don't push right of y-axis) and -(svgWidth - Y_AXIS_W) (don't hide all content).
-  const panX = liveScroll && containerWidth > 0
-    ? Math.max(-(svgWidth - Y_AXIS_W), Math.min(0, containerWidth - svgWidth))
+  // Use containerWidth from ResizeObserver (accurate to actual rendered element width).
+  // If not yet measured (0), use svgWidth so panX=0 and nothing is hidden before first measurement.
+  const effectiveContainerWidth = containerWidth > 0 ? containerWidth : svgWidth;
+  const panX = liveScroll
+    ? Math.max(-(svgWidth - Y_AXIS_W), Math.min(0, effectiveContainerWidth - svgWidth))
     : 0;
 
   // Button size scales with screen
@@ -193,13 +266,102 @@ export default function ContractionClock() {
 
       {/* ── Header ── */}
       <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: isMobile ? 10 : 11, letterSpacing: "0.3em", color: "#7a9ab0", textTransform: "uppercase", marginBottom: 6 }}>
+        {/* <div style={{ fontSize: isMobile ? 10 : 11, letterSpacing: "0.3em", color: "#7a9ab0", textTransform: "uppercase", marginBottom: 6 }}>
           Labor Companion
-        </div>
-        <h1 style={{ margin: 0, fontSize: isMobile ? 28 : 36, fontWeight: 400, color: "#f0e6d3", letterSpacing: "0.05em" }}>
+        </div> */}
+        <h1 style={{ margin: 0, fontSize: isMobile ? 30 : 40, fontWeight: 400, color: "#f0e6d3", letterSpacing: "0.05em" }}>
           Contraction Clock
         </h1>
       </div>
+
+      {/* ── 5-1-1 Rule Display ── */}
+      {
+        <div style={{
+          width: "100%", maxWidth: 860,
+          borderRadius: 12,
+          border: `1px solid ${rule511Met ? "rgba(220,100,80,0.4)" : "rgba(255,255,255,0.07)"}`,
+          background: rule511Met
+            ? "rgba(180,60,40,0.12)"
+            : "rgba(255,255,255,0.03)",
+          padding: isMobile ? "14px 16px" : "16px 24px",
+          transition: "all 0.4s ease",
+        }}>
+          {/* Header row */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+            <div>
+              <div style={{ fontSize: 10, letterSpacing: "0.25em", color: "#5a7a8a", textTransform: "uppercase", marginBottom: 4 }}>
+                5-1-1 Rule
+              </div>
+              <div style={{ fontSize: isMobile ? 11 : 12, color: "#6a8a9a", maxWidth: 340 }}>
+                Contractions ≤5 min apart, lasting ≥1 min, for ≥1 hour
+              </div>
+            </div>
+            {/* Is it time? badge */}
+            <div style={{
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 4,
+              flexShrink: 0, marginLeft: 16,
+            }}>
+              <div style={{ fontSize: 9, letterSpacing: "0.2em", color: "#5a7a8a", textTransform: "uppercase" }}>
+                Is it time?
+              </div>
+              <div style={{
+                fontSize: isMobile ? 18 : 22, fontWeight: 600,
+                color: rule511Met ? "#e87060" : "#3a6a5a",
+                letterSpacing: "0.05em",
+                textShadow: rule511Met ? "0 0 20px rgba(220,80,60,0.5)" : "none",
+                transition: "all 0.4s ease",
+              }}>
+                {rule511Met ? "YES" : "NOT YET"}
+              </div>
+            </div>
+          </div>
+
+          {/* Three progress indicators */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: isMobile ? 8 : 16 }}>
+            {[
+              {
+                label: "Frequency",
+                target: "≤ 5 min",
+                value: avgRecentInterval,
+                met: avgRecentInterval !== null && avgRecentInterval <= FIVE_MIN_MS,
+                display: avgRecentInterval ? formatDuration(avgRecentInterval) : "—",
+              },
+              {
+                label: "Duration",
+                target: "≥ 1 min",
+                value: avgRecentDuration,
+                met: avgRecentDuration !== null && avgRecentDuration >= ONE_MIN_MS,
+                display: avgRecentDuration ? formatDuration(avgRecentDuration) : "—",
+              },
+              {
+                label: "Ongoing",
+                target: "≥ 1 hour",
+                value: streakDuration,
+                met: streakDuration >= ONE_HOUR_MS,
+                display: qualifyingStreakStart !== null ? formatDuration(streakDuration) : "—",
+              },
+            ].map(({ label, target, met, display }) => (
+              <div key={label} style={{
+                borderRadius: 8,
+                background: met ? "rgba(80,160,100,0.1)" : "rgba(255,255,255,0.03)",
+                border: `1px solid ${met ? "rgba(80,160,100,0.3)" : "rgba(255,255,255,0.06)"}`,
+                padding: isMobile ? "8px 10px" : "10px 14px",
+                transition: "all 0.3s ease",
+              }}>
+                <div style={{ fontSize: 9, letterSpacing: "0.15em", color: "#5a7a8a", textTransform: "uppercase", marginBottom: 4 }}>
+                  {label}
+                </div>
+                <div style={{ fontSize: isMobile ? 15 : 18, color: met ? "#80c890" : "#e8c9a0", marginBottom: 2 }}>
+                  {display}
+                </div>
+                <div style={{ fontSize: 9, color: met ? "#50a870" : "#3a5a6a" }}>
+                  {met ? "✓ " : ""}{target}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      }
 
       {/* ── Controls: desktop = row, mobile = column ── */}
       <div style={{
@@ -308,7 +470,7 @@ export default function ContractionClock() {
               boxShadow: liveScroll ? "0 0 6px #5ab0d0" : "none",
               transition: "all 0.2s ease", display: "inline-block",
             }} />
-            {liveScroll ? "Live" : "Paused"}
+            {liveScroll ? "Current" : "Scroll Timeline"}
           </button>
         </div>
 
@@ -404,7 +566,7 @@ export default function ContractionClock() {
             {/* Empty state text in screen coords (not panned) */}
             {contractions.length === 0 && !activeStart && (
               <text
-                x={Y_AXIS_W + ((containerWidth || windowWidth) - Y_AXIS_W) / 2}
+                x={Y_AXIS_W + (effectiveContainerWidth - Y_AXIS_W) / 2}
                 y={PLOT_H / 2}
                 textAnchor="middle" fontSize={11} fill="#2a4a5a" fontFamily="Georgia, serif">
                 Tap the button when a contraction begins
@@ -436,33 +598,76 @@ export default function ContractionClock() {
       {/* ── Session Log ── */}
       {contractions.length > 0 && (
         <div style={{ width: "100%", maxWidth: 860 }}>
-          <div style={{ fontSize: 10, letterSpacing: "0.2em", color: "#5a7a8a", textTransform: "uppercase", marginBottom: 10 }}>
-            Session Log
+          <div style={{ fontSize: 10, letterSpacing: "0.2em", color: "#5a7a8a", textTransform: "uppercase", marginBottom: 12 }}>
+            Contraction Log
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {[...contractions].reverse().map((c, i) => (
-              <div key={c.id} style={{
-                display: "grid",
-                // On mobile hide the intensity bar column; on desktop show all 4
-                gridTemplateColumns: isMobile ? "28px 1fr 64px" : "28px 1fr 80px 120px",
-                alignItems: "center", gap: isMobile ? 8 : 16,
-                padding: isMobile ? "8px 12px" : "8px 16px",
-                borderRadius: 8,
-                background: i === 0 ? "rgba(90,160,200,0.08)" : "rgba(255,255,255,0.02)",
-                border: "1px solid rgba(255,255,255,0.05)",
-                fontSize: isMobile ? 12 : 13,
-              }}>
-                <span style={{ color: "#5ab0d0" }}>#{contractions.length - i}</span>
-                <span style={{ color: "#8aacbc" }}>{formatTime(c.start)}</span>
-                <span style={{ color: "#e8c9a0", textAlign: "right" }}>{formatDuration(c.duration)}</span>
-                {!isMobile && (
-                  <span style={{ color: "#a07850", fontFamily: "monospace", fontSize: 11 }}>
-                    {"▮".repeat(Math.round(c.intensity * 10))}{"▯".repeat(10 - Math.round(c.intensity * 10))}
-                  </span>
-                )}
-              </div>
-            ))}
-          </div>
+
+          {/* Column definitions — 5 cols desktop, 4 cols mobile (drop intensity bar) */}
+          {(() => {
+            const cols = isMobile ? "32px 1fr 60px 60px" : "36px 1fr 80px 80px 90px";
+            const headerStyle = {
+              fontSize: 9, letterSpacing: "0.18em", color: "#3a6a7a",
+              textTransform: "uppercase", padding: isMobile ? "0 6px" : "0 8px",
+            };
+            return (
+              <>
+                {/* Header row */}
+                <div style={{
+                  display: "grid", gridTemplateColumns: cols,
+                  gap: isMobile ? 6 : 12,
+                  padding: isMobile ? "0 12px 6px" : "0 16px 8px",
+                  borderBottom: "1px solid rgba(255,255,255,0.07)",
+                  marginBottom: 6,
+                }}>
+                  <span style={headerStyle}>#</span>
+                  <span style={headerStyle}>Start Time</span>
+                  <span style={{ ...headerStyle, textAlign: "right" }}>Duration</span>
+                  <span style={{ ...headerStyle, textAlign: "right" }}>Frequency</span>
+                  {!isMobile && <span style={{ ...headerStyle, textAlign: "right" }}>Intensity</span>}
+                </div>
+
+                {/* Data rows — chronological order (oldest first, newest last) */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  {[...contractions].reverse().map((c, i) => {
+                    const originalIndex = contractions.length - 1 - i;
+                    const frequency = originalIndex === 0 ? null : c.start - contractions[originalIndex - 1].start;
+                    const isLatest = i === 0;
+                    return (
+                      <div key={c.id} style={{
+                        display: "grid", gridTemplateColumns: cols,
+                        alignItems: "center", gap: isMobile ? 6 : 12,
+                        padding: isMobile ? "7px 12px" : "8px 16px",
+                        borderRadius: 7,
+                        background: isLatest ? "rgba(90,160,200,0.08)" : "rgba(255,255,255,0.02)",
+                        border: `1px solid ${isLatest ? "rgba(90,160,200,0.15)" : "rgba(255,255,255,0.04)"}`,
+                        fontSize: isMobile ? 11 : 13,
+                        transition: "background 0.2s",
+                      }}>
+                        <span style={{ color: "#5ab0d0", fontVariantNumeric: "tabular-nums" }}>
+                          #{originalIndex + 1}
+                        </span>
+                        <span style={{ color: "#8aacbc", fontVariantNumeric: "tabular-nums" }}>
+                          {formatTime(c.start)}
+                        </span>
+                        <span style={{ color: "#e8c9a0", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {formatDuration(c.duration)}
+                        </span>
+                        <span style={{ color: frequency ? "#a8c8a0" : "#3a5a4a", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                          {frequency ? formatDuration(frequency) : "—"}
+                        </span>
+                        {!isMobile && (
+                          <span style={{ color: "#a07850", textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                            {Math.round(c.intensity * 10)} / 10
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            );
+          })()}
+
           <button onClick={clearSession} style={{
             marginTop: 16, background: "none", border: "1px solid #2a3a4a",
             color: "#4a6a7a", fontSize: 11, letterSpacing: "0.15em", padding: "8px 20px",
