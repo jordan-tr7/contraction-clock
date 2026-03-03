@@ -311,7 +311,7 @@ export default function ContractionClock() {
                 textShadow: rule511Met ? "0 0 20px rgba(220,80,60,0.5)" : "none",
                 transition: "all 0.4s ease",
               }}>
-                {rule511Met ? "YES" : "NOT YET"}
+                {rule511Met ? "YES" : "PROBABLY NOT"}
               </div>
             </div>
           </div>
@@ -360,6 +360,15 @@ export default function ContractionClock() {
               </div>
             ))}
           </div>
+        
+          {/* Header Re: Call Doctor when*/}
+          <div style={{ fontSize: isMobile ? 12 : 14, color: "#f0e6d3",paddingTop:20, paddingBottom: 5
+          }}> 
+          <h3><span style={{color:"darkorange"}}>Please Note: </span> Call your doctor if you have vaginal bleeding, leaking fluid, 
+            or can't feel your baby move.</h3>
+            
+          </div>
+
         </div>
       }
 
